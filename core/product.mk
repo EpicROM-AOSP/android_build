@@ -161,6 +161,7 @@ _product_list_vars += PRODUCT_BOOT_JARS_EXTRA
 # List of jars to be included in the ART boot image for testing.
 _product_list_vars += PRODUCT_TEST_ONLY_ART_BOOT_IMAGE_JARS
 
+_product_single_value_vars += PRODUCT_SUPPORTS_VBOOT
 _product_list_vars += PRODUCT_SYSTEM_SERVER_APPS
 # List of system_server classpath jars on the platform.
 _product_list_vars += PRODUCT_SYSTEM_SERVER_JARS
@@ -557,12 +558,15 @@ endef
 
 # Makes including non-existent modules in PRODUCT_PACKAGES an error.
 # $(1): list of non-existent modules to allow.
+define enforce-product-packages-exist-internal
+  $(eval PRODUCTS.$(1).PRODUCT_ENFORCE_PACKAGES_EXIST := true) \
+  $(eval PRODUCTS.$(1).PRODUCT_ENFORCE_PACKAGES_EXIST_ALLOW_LIST := $(2)) \
+  $(eval .KATI_READONLY := PRODUCTS.$(1).PRODUCT_ENFORCE_PACKAGES_EXIST) \
+  $(eval .KATI_READONLY := PRODUCTS.$(1).PRODUCT_ENFORCE_PACKAGES_EXIST_ALLOW_LIST)
+endef
 define enforce-product-packages-exist
   $(eval current_mk := $(strip $(word 1,$(_include_stack)))) \
-  $(eval PRODUCTS.$(current_mk).PRODUCT_ENFORCE_PACKAGES_EXIST := true) \
-  $(eval PRODUCTS.$(current_mk).PRODUCT_ENFORCE_PACKAGES_EXIST_ALLOW_LIST := $(1)) \
-  $(eval .KATI_READONLY := PRODUCTS.$(current_mk).PRODUCT_ENFORCE_PACKAGES_EXIST) \
-  $(eval .KATI_READONLY := PRODUCTS.$(current_mk).PRODUCT_ENFORCE_PACKAGES_EXIST_ALLOW_LIST)
+  $(enforce-product-packages-exist-internal,$(current_mk),$(1))
 endef
 
 #
@@ -604,9 +608,11 @@ _readonly_late_variables := \
 
 # Modified internally in the build system
 _readonly_late_variables += \
+  PRODUCT_CFI_INCLUDE_PATHS \
   PRODUCT_COPY_FILES \
   PRODUCT_DEX_PREOPT_NEVER_ALLOW_STRIPPING \
   PRODUCT_DEX_PREOPT_BOOT_FLAGS \
+  PRODUCT_SOONG_NAMESPACES
 
 _readonly_early_variables := $(filter-out $(_readonly_late_variables),$(_product_var_list))
 

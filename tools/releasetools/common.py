@@ -445,7 +445,7 @@ class BuildInfo(object):
           "system_other"] = self._partition_fingerprints["system"]
 
     # These two should be computed only after setting self._oem_props.
-    self._device = self.GetOemProperty("ro.product.device")
+    self._device = info_dict.get("ota_override_device", self.GetOemProperty("ro.product.device"))
     self._fingerprint = self.CalculateFingerprint()
     check_fingerprint(self._fingerprint)
 
@@ -675,7 +675,7 @@ class BuildInfo(object):
     return self.GetBuildProp(key)
 
   def GetPartitionFingerprint(self, partition):
-    return self._partition_fingerprints.get(partition, None)
+    return self._partition_fingerprints.get(partition, self.CalculateFingerprint())
 
   def CalculatePartitionFingerprint(self, partition):
     try:
@@ -832,11 +832,14 @@ def ExtractFromInputFile(input_file, fn):
 class RamdiskFormat(object):
   LZ4 = 1
   GZ = 2
+  XZ = 3
 
 
 def GetRamdiskFormat(info_dict):
   if info_dict.get('lz4_ramdisks') == 'true':
     ramdisk_format = RamdiskFormat.LZ4
+  elif info_dict.get('xz_ramdisks') == 'true':
+    ramdisk_format = RamdiskFormat.XZ
   else:
     ramdisk_format = RamdiskFormat.GZ
   return ramdisk_format
@@ -962,7 +965,11 @@ def LoadInfoDict(input_file, repacking=False):
     makeint(b.replace(".img", "_size"))
 
   # Load recovery fstab if applicable.
-  d["fstab"] = _FindAndLoadRecoveryFstab(d, input_file, read_helper)
+  if isinstance(input_file, str) and zipfile.is_zipfile(input_file):
+    with zipfile.ZipFile(input_file, 'r', allowZip64=True) as input_zip:
+      d["fstab"] = _FindAndLoadRecoveryFstab(d, input_zip, read_helper)
+  else:
+    d["fstab"] = _FindAndLoadRecoveryFstab(d, input_file, read_helper)
   ramdisk_format = GetRamdiskFormat(d)
 
   # Tries to load the build props for all partitions with care_map, including
@@ -1241,9 +1248,10 @@ def LoadRecoveryFSTab(read_helper, fstab_version, recovery_fstab_path):
         context = i
 
     mount_point = pieces[1]
-    d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[2],
-                               device=pieces[0], length=length, context=context,
-                               slotselect=slotselect)
+    if not d.get(mount_point):
+        d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[2],
+                                   device=pieces[0], length=length, context=context,
+                                   slotselect=slotselect)
 
   return d
 
@@ -1693,10 +1701,13 @@ def _MakeRamdisk(sourcedir, fs_config_file=None,
   if ramdisk_format == RamdiskFormat.LZ4:
     p2 = Run(["lz4", "-l", "-12", "--favor-decSpeed"], stdin=p1.stdout,
              stdout=ramdisk_img.file.fileno())
+  elif ramdisk_format == RamdiskFormat.XZ:
+    p2 = Run(["xz", "-f", "-c", "--check=crc32", "--lzma2=dict=32MiB"], stdin=p1.stdout,
+             stdout=ramdisk_img.file.fileno())
   elif ramdisk_format == RamdiskFormat.GZ:
     p2 = Run(["gzip"], stdin=p1.stdout, stdout=ramdisk_img.file.fileno())
   else:
-    raise ValueError("Only support lz4 or gzip ramdisk format.")
+    raise ValueError("Only support lz4, xz or gzip ramdisk format.")
 
   p2.wait()
   p1.wait()
@@ -1784,6 +1795,11 @@ def _BuildBootableImage(image_name, sourcedir, fs_config_file,
     cmd.append("--pagesize")
     cmd.append(open(fn).read().rstrip("\n"))
 
+  fn = os.path.join(sourcedir, "dt")
+  if os.access(fn, os.F_OK):
+    cmd.append("--dt")
+    cmd.append(fn)
+
   if partition_name == "recovery":
     args = info_dict.get("recovery_mkbootimg_args")
     if not args:
@@ -1804,7 +1820,12 @@ def _BuildBootableImage(image_name, sourcedir, fs_config_file,
   if has_ramdisk:
     cmd.extend(["--ramdisk", ramdisk_img.name])
 
-  cmd.extend(["--output", img.name])
+  img_unsigned = None
+  if info_dict.get("vboot"):
+    img_unsigned = tempfile.NamedTemporaryFile()
+    cmd.extend(["--output", img_unsigned.name])
+  else:
+    cmd.extend(["--output", img.name])
 
   if partition_name == "recovery":
     if info_dict.get("include_recovery_dtbo") == "true":
@@ -1815,6 +1836,28 @@ def _BuildBootableImage(image_name, sourcedir, fs_config_file,
       cmd.extend(["--recovery_acpio", fn])
 
   RunAndCheckOutput(cmd)
+
+  # Sign the image if vboot is non-empty.
+  if info_dict.get("vboot"):
+    path = "/" + partition_name
+    img_keyblock = tempfile.NamedTemporaryFile()
+    # We have switched from the prebuilt futility binary to using the tool
+    # (futility-host) built from the source. Override the setting in the old
+    # TF.zip.
+    futility = info_dict["futility"]
+    if futility.startswith("prebuilts/"):
+      futility = "futility-host"
+    cmd = [info_dict["vboot_signer_cmd"], futility,
+           img_unsigned.name, info_dict["vboot_key"] + ".vbpubk",
+           info_dict["vboot_key"] + ".vbprivk",
+           info_dict["vboot_subkey"] + ".vbprivk",
+           img_keyblock.name,
+           img.name]
+    RunAndCheckOutput(cmd)
+
+    # Clean up the temp files.
+    img_unsigned.close()
+    img_keyblock.close()
 
   # AVB: if enabled, calculate and add hash to boot.img or recovery.img.
   if info_dict.get("avb_enable") == "true":
@@ -2866,6 +2909,7 @@ class PasswordManager(object):
   def __init__(self):
     self.editor = os.getenv("EDITOR")
     self.pwfile = os.getenv("ANDROID_PW_FILE")
+    self.secure_storage_cmd = os.getenv("ANDROID_SECURE_STORAGE_CMD", None)
 
   def GetPasswords(self, items):
     """Get passwords corresponding to each string in 'items',
@@ -2885,7 +2929,21 @@ class PasswordManager(object):
       missing = []
       for i in items:
         if i not in current or not current[i]:
-          missing.append(i)
+          # Attempt to load using ANDROID_SECURE_STORAGE_CMD
+          if self.secure_storage_cmd:
+            try:
+              os.environ["TMP__KEY_FILE_NAME"] = str(i)
+              ps = subprocess.Popen(self.secure_storage_cmd, shell=True, stdout=subprocess.PIPE)
+              output = ps.communicate()[0]
+              if ps.returncode == 0:
+                current[i] = output.decode('utf-8')
+              else:
+                logger.warning('Failed to get password for key "%s".', i)
+            except Exception as e:
+              print(e)
+              pass
+          if i not in current or not current[i]:
+            missing.append(i)
       # Are all the passwords already in the file?
       if not missing:
         return current
@@ -3175,6 +3233,11 @@ class DeviceSpecificParams(object):
     """Called at the end of full OTA installation; typically this is
     used to install the image for the device's baseband processor."""
     return self._DoCall("FullOTA_InstallEnd")
+
+  def FullOTA_PostValidate(self):
+    """Called after installing and validating /system; typically this is
+    used to resize the system partition after a block based installation."""
+    return self._DoCall("FullOTA_PostValidate")
 
   def IncrementalOTA_Assertions(self):
     """Called after emitting the block of assertions at the top of an
@@ -3792,40 +3855,19 @@ def MakeRecoveryPatch(input_dir, output_sink, recovery_img, boot_img,
 
   full_recovery_image = info_dict.get("full_recovery_image") == "true"
   board_uses_vendorimage = info_dict.get("board_uses_vendorimage") == "true"
+  board_builds_vendorimage =  info_dict.get("board_builds_vendorimage") == "true"
 
-  if board_uses_vendorimage:
-    # In this case, the output sink is rooted at VENDOR
+  if board_builds_vendorimage or not board_uses_vendorimage:
     recovery_img_path = "etc/recovery.img"
-    recovery_resource_dat_path = "VENDOR/etc/recovery-resource.dat"
-    sh_dir = "bin"
   else:
-    # In this case the output sink is rooted at SYSTEM
-    recovery_img_path = "vendor/etc/recovery.img"
-    recovery_resource_dat_path = "SYSTEM/vendor/etc/recovery-resource.dat"
-    sh_dir = "vendor/bin"
+    logger.warning('Recovery patch generation is disable when prebuilt vendor image is used.')
+    return None
 
   if full_recovery_image:
     output_sink(recovery_img_path, recovery_img.data)
 
   else:
-    include_recovery_dtbo = info_dict.get("include_recovery_dtbo") == "true"
-    include_recovery_acpio = info_dict.get("include_recovery_acpio") == "true"
-    path = os.path.join(input_dir, recovery_resource_dat_path)
-    # Use bsdiff to handle mismatching entries (Bug: 72731506)
-    if include_recovery_dtbo or include_recovery_acpio:
-      diff_program = ["bsdiff"]
-      bonus_args = ""
-      assert not os.path.exists(path)
-    else:
-      diff_program = ["imgdiff"]
-      if os.path.exists(path):
-        diff_program.append("-b")
-        diff_program.append(path)
-        bonus_args = "--bonus /vendor/etc/recovery-resource.dat"
-      else:
-        bonus_args = ""
-
-    d = Difference(recovery_img, boot_img, diff_program=diff_program)
+    d = Difference(recovery_img, boot_img)
     _, _, patch = d.ComputePatch()
     output_sink("recovery-from-boot.p", patch)
 
@@ -3863,7 +3905,7 @@ fi
   else:
     sh = """#!/vendor/bin/sh
 if ! applypatch --check %(recovery_type)s:%(recovery_device)s:%(recovery_size)d:%(recovery_sha1)s; then
-  applypatch %(bonus_args)s \\
+  applypatch \\
           --patch /vendor/recovery-from-boot.p \\
           --source %(boot_type)s:%(boot_device)s:%(boot_size)d:%(boot_sha1)s \\
           --target %(recovery_type)s:%(recovery_device)s:%(recovery_size)d:%(recovery_sha1)s && \\
@@ -3879,16 +3921,11 @@ fi
        'boot_type': boot_type,
        'boot_device': boot_device + '$(getprop ro.boot.slot_suffix)',
        'recovery_type': recovery_type,
-       'recovery_device': recovery_device + '$(getprop ro.boot.slot_suffix)',
-       'bonus_args': bonus_args}
+       'recovery_device': recovery_device + '$(getprop ro.boot.slot_suffix)'}
 
   # The install script location moved from /system/etc to /system/bin in the L
   # release. In the R release it is in VENDOR/bin or SYSTEM/vendor/bin.
-  sh_location = os.path.join(sh_dir, "install-recovery.sh")
-
-  logger.info("putting script in %s", sh_location)
-
-  output_sink(sh_location, sh.encode())
+  output_sink("bin/install-recovery.sh", sh.encode())
 
 
 class DynamicPartitionUpdate(object):
@@ -3927,10 +3964,14 @@ class DynamicGroupUpdate(object):
 
 class DynamicPartitionsDifference(object):
   def __init__(self, info_dict, block_diffs, progress_dict=None,
-               source_info_dict=None):
+               source_info_dict=None, build_without_vendor=False):
     if progress_dict is None:
       progress_dict = {}
 
+    self._have_super_empty = \
+      info_dict.get("build_super_empty_partition") == "true"
+
+    self._build_without_vendor = build_without_vendor
     self._remove_all_before_apply = False
     if source_info_dict is None:
       self._remove_all_before_apply = True
@@ -4027,8 +4068,13 @@ class DynamicPartitionsDifference(object):
     ZipWrite(output_zip, op_list_path, "dynamic_partitions_op_list")
 
     script.Comment('Update dynamic partition metadata')
-    script.AppendExtra('assert(update_dynamic_partitions('
-                       'package_extract_file("dynamic_partitions_op_list")));')
+    if self._have_super_empty:
+      script.AppendExtra('assert(update_dynamic_partitions('
+                        'package_extract_file("dynamic_partitions_op_list"), '
+                        'package_extract_file("unsparse_super_empty.img")));')
+    else:
+      script.AppendExtra('assert(update_dynamic_partitions('
+                        'package_extract_file("dynamic_partitions_op_list")));')
 
     if write_verify_script:
       for p, u in self._partition_updates.items():
@@ -4054,6 +4100,17 @@ class DynamicPartitionsDifference(object):
 
     def comment(line):
       self._op_list.append("# %s" % line)
+
+    if self._build_without_vendor:
+      comment('System-only build, keep original vendor partition')
+      # When building without vendor, we do not want to override
+      # any partition already existing. In this case, we can only
+      # resize, but not remove / create / re-create any other
+      # partition.
+      for p, u in self._partition_updates.items():
+        comment('Resize partition %s to %s' % (p, u.tgt_size))
+        append('resize %s %s' % (p, u.tgt_size))
+      return
 
     if self._remove_all_before_apply:
       comment('Remove all existing dynamic partitions and groups before '
@@ -4137,8 +4194,14 @@ def GetBootImageBuildProp(boot_img, ramdisk_format=RamdiskFormat.LZ4):
           p2 = Run(['gzip', '-d'], stdin=input_stream.fileno(),
                    stdout=output_stream.fileno())
           p2.wait()
+    elif ramdisk_format == RamdiskFormat.XZ:
+      with open(ramdisk, 'rb') as input_stream:
+        with open(uncompressed_ramdisk, 'wb') as output_stream:
+          p2 = Run(['xz', '-d'], stdin=input_stream.fileno(),
+                   stdout=output_stream.fileno())
+          p2.wait()
     else:
-      logger.error('Only support lz4 or gzip ramdisk format.')
+      logger.error('Only support lz4, xz or gzip ramdisk format.')
       return None
 
     abs_uncompressed_ramdisk = os.path.abspath(uncompressed_ramdisk)

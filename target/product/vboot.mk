@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2019 The Android Open Source Project
+# Copyright (C) 2015 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,20 +14,12 @@
 # limitations under the License.
 #
 
-# Base modules and settings for the product partition.
-PRODUCT_PACKAGES += \
-    build_flag_product \
-    fs_config_dirs_product \
-    fs_config_files_product \
-    group_product \
-    ModuleMetadata \
-    passwd_product \
-    product_compatibility_matrix.xml \
-    product_manifest.xml \
-    selinux_policy_product \
-    product-build.prop \
+# Provides dependencies necessary for verified boot
 
-# Packages included only for eng or userdebug builds, previously debug tagged
-PRODUCT_PACKAGES_DEBUG += \
-    adb_keys \
-    adb_keys.recovery
+PRODUCT_SUPPORTS_VBOOT := true
+
+# The dev key is used to sign boot and recovery images.
+# We expect this file to exist with the suffixes ".vbprivk" and ".vbpupk".
+# TODO: find a proper location for this
+PRODUCT_VBOOT_SIGNING_KEY := external/vboot_reference/tests/devkeys/kernel_data_key
+PRODUCT_VBOOT_SIGNING_SUBKEY := external/vboot_reference/tests/devkeys/kernel_subkey

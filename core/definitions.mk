@@ -3206,7 +3206,7 @@ $(check_non_elf_file_timestamp): $(1) $(LLVM_READOBJ)
 	$(hide) mkdir -p "$$(dir $$@)"
 	$(hide) rm -f "$$@"
 	$(hide) \
-	    if $(LLVM_READOBJ) -h "$$<" >/dev/null 2>&1; then \
+	    if $(LLVM_READOBJ) -h "$$<" 2>/dev/null | grep -q "^Format: elf"; then \
 	        $(call echo-error,$(2),$(3)); \
 	        $(call echo-error,$(2),found ELF file: $$<); \
 	        false; \
@@ -3954,6 +3954,7 @@ $(foreach source,$(ENFORCE_RRO_SOURCES), \
   $(eval enforce_rro_partition := $(word 6,$(_o))) \
   $(eval include $(BUILD_SYSTEM)/generate_enforce_rro.mk) \
   $(eval ALL_MODULES.$$(enforce_rro_source_module).REQUIRED_FROM_TARGET += $$(LOCAL_PACKAGE_NAME)) \
+  $(eval ENFORCE_RRO_PACKAGES_$$(call to-upper,$(enforce_rro_partition)) += $$(LOCAL_PACKAGE_NAME)) \
 )
 endef
 

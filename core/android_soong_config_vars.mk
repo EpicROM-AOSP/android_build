@@ -201,3 +201,30 @@ $(call soong_config_set_bool,gralloc,target_use_pan_display,$(if $(filter true,$
 
 # Add use_camera_v4l2_hal flag for hardware/libhardware/modules/camera/3_4:camera.v4l2
 $(call soong_config_set_bool,camera,use_camera_v4l2_hal,$(if $(filter true,$(USE_CAMERA_V4L2_HAL)),true,false))
+
+# Add sim_count, disable_rild_oem_hook, and use_aosp_rild flag for ril related modules
+$(call soong_config_set,ril,sim_count,$(SIM_COUNT))
+ifneq ($(DISABLE_RILD_OEM_HOOK), false)
+  $(call soong_config_set_bool,ril,disable_rild_oem_hook,true)
+endif
+ifneq ($(ENABLE_VENDOR_RIL_SERVICE), true)
+  $(call soong_config_set_bool,ril,use_aosp_rild,true)
+endif
+
+# Export target_board_platform to soong for hardware/google/graphics/common/libmemtrack:memtrack.$(TARGET_BOARD_PLATFORM)
+$(call soong_config_set,ANDROID,target_board_platform,$(TARGET_BOARD_PLATFORM))
+
+# Export related variables to soong for hardware/google/graphics/common/libacryl:libacryl
+ifdef BOARD_LIBACRYL_DEFAULT_COMPOSITOR
+  $(call soong_config_set,acryl,libacryl_default_compositor,$(BOARD_LIBACRYL_DEFAULT_COMPOSITOR))
+endif
+ifdef BOARD_LIBACRYL_DEFAULT_SCALER
+  $(call soong_config_set,acryl,libacryl_default_scaler,$(BOARD_LIBACRYL_DEFAULT_SCALER))
+endif
+ifdef BOARD_LIBACRYL_DEFAULT_BLTER
+  $(call soong_config_set,acryl,libacryl_default_blter,$(BOARD_LIBACRYL_DEFAULT_BLTER))
+endif
+ifdef BOARD_LIBACRYL_G2D_HDR_PLUGIN
+  #BOARD_LIBACRYL_G2D_HDR_PLUGIN is set in each board config
+  $(call soong_config_set_bool,acryl,libacryl_use_g2d_hdr_plugin,true)
+endif
